@@ -1,120 +1,207 @@
 import streamlit as st
 import pandas as pd
-import re
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from io import BytesIO
+import re
 from datetime import datetime
 
-# 1. 웹페이지 설정
-st.set_page_config(page_title="체인로지스 정산 변환기", layout="centered")
+# 1. 웹페이지 기본 설정
+st.set_page_config(page_title="체인로지스 정산 프로그램", layout="centered")
 
 st.title("📊 체인로지스 정산 데이터 변환 프로그램")
-st.write("원본 엑셀 파일을 업로드하고 '변환 시작' 버튼을 클릭하세요.")
+st.write("원본 정산양식 엑셀 파일을 업로드하고 '분석 시작' 버튼을 클릭하세요.")
 
-# 2. 파일 업로드 섹션
-uploaded_file = st.file_uploader("변환할 엑셀 파일(xlsx)을 업로드해주세요.", type=["xlsx", "xls"])
+# 2. 파일 업로드 (xlsx 전용)
+uploaded_file = st.file_uploader("정산양식 엑셀 파일(xlsx)을 업로드해주세요.", type=["xlsx"])
 
 if uploaded_file is not None:
-    st.success(f"파일이 업로드되었습니다! (파일명: {uploaded_file.name})")
+    st.success(f"파일 업로드 완료: {uploaded_file.name}")
 
-    # 3. 변환 시작 버튼
-    if st.button("변환 시작"):
+    # 3. 분석 시작 버튼
+    if st.button("분석 시작"):
         try:
-            # 로딩 바 표시
-            with st.spinner('데이터를 규칙에 맞게 가공하는 중입니다...'):
-
-                # 엑셀 읽기
-                df = pd.read_excel(uploaded_file)
-
-                # --- [데이터 가공 로직 시작] ---
-
-                # [추가 규칙] '픽업시간' 열이 비어있는(NaN) 행 전체 삭제
-                if '픽업시간' in df.columns:
-                    df = df.dropna(subset=['픽업시간'])
-                    # 빈 문자열('')이나 공백만 있는 경우도 제거하기 위한 안전장치
-                    df = df[df['픽업시간'].astype(str).str.strip() != '']
-
-                # 계산을 위해 datetime 형식으로 임시 변환
-                if '픽업시간' in df.columns:
-                    df['픽업시간_dt'] = pd.to_datetime(df['픽업시간'], errors='coerce')
-                if '완료시간' in df.columns:
-                    df['완료시간_dt'] = pd.to_datetime(df['완료시간'], errors='coerce')
-
-                # 규칙 1. '일자' 열 생성 (픽업시간 앞)
-                if '픽업시간' in df.columns:
-                    date_col = df['픽업시간_dt'].dt.strftime('%Y-%m-%d')
-                    pickup_idx = df.columns.get_loc('픽업시간')
-                    df.insert(pickup_idx, '일자', date_col)
-
-                # 규칙 2. '소요시간' 열 생성 (완료시간 뒤)
-                if '픽업시간' in df.columns and '완료시간' in df.columns:
-                    duration_col = (df['완료시간_dt'] - df['픽업시간_dt']).dt.total_seconds() / 3600.0
-                    duration_col = duration_col.round(2)  # 소수점 둘째자리 반올림
-                    finish_idx = df.columns.get_loc('완료시간')
-                    df.insert(finish_idx + 1, '소요시간', duration_col)
-
-                # 규칙 6. '출고/회수' 열 생성 (발송인 뒤)
-                if '발송인' in df.columns:
-                    type_col = df['발송인'].apply(lambda x: '출고' if str(x).strip() == '신상마켓' else '회수')
-                    sender_idx = df.columns.get_loc('발송인')
-                    df.insert(sender_idx + 1, '출고/회수', type_col)
-
-                # 규칙 3. '경유지수' 열 생성 (경유지개수 뒤)
-                if '경유지개수' in df.columns:
-                    stopover_col = pd.to_numeric(df['경유지개수'], errors='coerce').fillna(0).astype(int) + 1
-                    stop_idx = df.columns.get_loc('경유지개수')
-                    df.insert(stop_idx + 1, '경유지수', stopover_col)
-
-                # 규칙 4. '대박스개수' 열 생성 (물품정보 뒤)
-                if '물품정보' in df.columns:
-                    def extract_box_count(text):
-                        if pd.isna(text):
-                            return 0
-                        match = re.search(r'대박스\s*(\d+)', str(text))
-                        if match:
-                            return int(match.group(1))
-                        return 0
-
-
-                    box_col = df['물품정보'].apply(extract_box_count)
-                    info_idx = df.columns.get_loc('물품정보')
-                    df.insert(info_idx + 1, '대박스개수', box_col)
-
-                # 규칙 5. '배송무게' 열 이름 변경 및 데이터 숫자화
-                if '배송무게' in df.columns:
-                    df['배송무게'] = df['배송무게'].astype(str).str.extract(r'(\d+\.?\d*)')
-                    df['배송무게'] = pd.to_numeric(df['배송무게'], errors='coerce').fillna(0)
-                    df = df.rename(columns={'배송무게': '배송무게(kg)'})
-
-                # 임시 변수 제거
-                df = df.drop(columns=['픽업시간_dt', '완료시간_dt'], errors='ignore')
-
-                # --- [데이터 가공 로직 끝] ---
-
-                # 4. 결과 파일을 메모리에 생성 (openpyxl 사용)
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
-                processed_data = output.getvalue()
-
-                # --- [동적 파일명 생성 로직] ---
+            with st.spinner('데이터 가공 및 xlsx 파일 생성 중...'):
+                
+                # --- 입력 파일명에서 '월' 추출 및 동적 텍스트 설정 ---
                 input_filename = uploaded_file.name
-                # 파일 이름에서 숫자+월 (예: 5월, 05월, 12월 등) 추출
                 month_match = re.search(r'(\d+월)', input_filename)
-
+                
                 if month_match:
-                    extracted_month = month_match.group(1)  # "5월" 추출
-                    download_filename = f"체인로지스 정산_{extracted_month}.xlsx"
+                    extracted_month = month_match.group(1)  # 예: "5월"
                 else:
-                    # 파일 이름에 '월'이 없는 경우 오늘 날짜를 기본값으로 사용
-                    today_str = datetime.now().strftime('%Y%m%d')
-                    download_filename = f"체인로지스 정산_{today_str}.xlsx"
+                    extracted_month = f"{datetime.now().month}월"  # 없을 경우 현재 월 기본값
+                
+                download_filename = f"체인로지스 정산_{extracted_month}.xlsx"
+                sheet_title = f"{extracted_month} 정산결과"
+                accident_title = f"{extracted_month} 사고내역 0건"
 
-                st.balloons()  # 성공 축하 풍선 효과
-                st.success("변환 완료")
+                # 4. 시트별 데이터 전처리 및 집계 함수
+                def process_sheet_data(file_obj, sheet_name):
+                    df = pd.read_excel(file_obj, sheet_name=sheet_name, engine='openpyxl')
+                    df.columns = df.columns.str.strip()
 
-                # 5. 다운로드 버튼 표시 (동적으로 바뀐 파일명 적용)
+                    # 날짜 정제
+                    df["접수일자"] = pd.to_datetime(df["배송완료"], errors="coerce").dt.strftime("%Y-%m-%d")
+                    df = df.dropna(subset=["접수일자"])
+
+                    # 고유 ID 컬럼 자동 매칭
+                    id_col = [c for c in df.columns if "번호" in c or "ID" in c or "운송장" in c][0]
+
+                    summary = (
+                        df.groupby("접수일자")
+                        .agg(배송건=(id_col, "nunique"), 단가=("요금", "median"))
+                        .reset_index()
+                    )
+                    return summary
+
+                # 야간/주간 탭 가공 및 결합
+                df_night = process_sheet_data(uploaded_file, "야간")
+                df_day = process_sheet_data(uploaded_file, "주간")
+
+                all_dates = pd.merge(
+                    df_night, df_day, on="접수일자", how="outer", suffixes=("_당일", "_회차")
+                ).fillna(0)
+                all_dates = all_dates.sort_values(by="접수일자").reset_index(drop=True)
+
+                # 5. openpyxl을 이용한 새 xlsx 객체 생성 및 기본 양식 설정
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = sheet_title
+                ws.views.sheetView[0].showGridLines = True
+
+                # 2단 헤더 생성
+                ws.merge_cells("A1:A2")
+                ws.merge_cells("B1:E1")
+                ws.merge_cells("F1:I1")
+                ws.merge_cells("J1:K1")
+
+                ws["A1"] = "접수일자"
+                ws["B1"] = "당일배송"
+                ws["F1"] = "회차배송"
+                ws["J1"] = "총합계"
+
+                headers_level2 = [
+                    "단가", "배송건", "금 액", "부가세",
+                    "단가", "배송건", "금 액", "부가세",
+                    "배송건수", "금 액",
+                ]
+                for col_idx, header in enumerate(headers_level2, start=2):
+                    ws.cell(row=2, column=col_idx, value=header)
+
+                # 6. 일자별 데이터 기록 및 계산 수식 입력
+                pickup_count = 0
+                start_row = 3
+
+                for idx, row in all_dates.iterrows():
+                    r = start_row + idx
+                    ws.cell(row=r, column=1, value=row["접수일자"])
+
+                    day_cnt = int(row["배송건_당일"])
+                    cycle_cnt = int(row["배송건_회차"])
+
+                    if (day_cnt + cycle_cnt) >= 10:
+                        pickup_count += 1
+
+                    # 당일배송
+                    ws.cell(row=r, column=2, value=row["단가_당일"] if row["단가_당일"] > 0 else 2400)
+                    ws.cell(row=r, column=3, value=day_cnt)
+                    ws.cell(row=r, column=4, value=f"=B{r}*C{r}")
+                    ws.cell(row=r, column=5, value=f"=D{r}*0.1")
+
+                    # 회차배송
+                    ws.cell(row=r, column=6, value=row["단가_회차"] if row["단가_회차"] > 0 else 3500)
+                    ws.cell(row=r, column=7, value=cycle_cnt)
+                    ws.cell(row=r, column=8, value=f"=F{r}*G{r}")
+                    ws.cell(row=r, column=9, value=f"=H{r}*0.1")
+
+                    # 총합계 열
+                    ws.cell(row=r, column=10, value=f"=C{r}+G{r}")
+                    ws.cell(row=r, column=11, value=f"=SUM(D{r}:E{r})+SUM(H{r}:I{r})")
+
+                data_end_row = start_row + len(all_dates) - 1
+
+                # 7. 하단 특수 행 추가
+                # (1) 픽업비용 행
+                pickup_row = data_end_row + 1
+                ws.merge_cells(f"A{pickup_row}:F{pickup_row}")
+                ws.cell(row=pickup_row, column=1, value=f"픽업비용({pickup_count}회)")
+                ws.cell(row=pickup_row, column=10, value=pickup_count)
+                ws.cell(row=pickup_row, column=8, value=f"=60000*J{pickup_row}")
+                ws.cell(row=pickup_row, column=9, value=f"=H{pickup_row}*0.1")
+                ws.cell(row=pickup_row, column=11, value=f"=SUM(H{pickup_row}:I{pickup_row})")
+
+                # (2) 사고내역 행
+                accident_row = pickup_row + 1
+                ws.merge_cells(f"A{accident_row}:J{accident_row}")
+                ws.cell(row=accident_row, column=1, value=accident_title)
+                ws.cell(row=accident_row, column=11, value=0)
+
+                # (3) 최종 [총합계] 행
+                total_row = accident_row + 1
+                ws.cell(row=total_row, column=1, value="총합계")
+
+                ws.cell(row=total_row, column=3, value=f"=SUM(C3:C{data_end_row})")
+                ws.cell(row=total_row, column=4, value=f"=SUM(D3:D{data_end_row})")
+                ws.cell(row=total_row, column=5, value=f"=SUM(E3:E{data_end_row})")
+
+                ws.cell(row=total_row, column=7, value=f"=SUM(G3:G{data_end_row})")
+                ws.cell(row=total_row, column=8, value=f"=SUM(H3:H{pickup_row})")
+                ws.cell(row=total_row, column=9, value=f"=SUM(I3:I{pickup_row})")
+
+                ws.cell(row=total_row, column=10, value=f"=SUM(J3:J{data_end_row})")
+                ws.cell(row=total_row, column=11, value=f"=SUM(K3:K{pickup_row})+K{accident_row}")
+
+                # 8. 디자인 스타일 및 포맷 적용
+                header_fill = PatternFill(start_color="8FCE00", end_color="8FCE00", fill_type="solid")
+                font_header = Font(name="맑은 고딕", size=11, bold=True)
+                font_data = Font(name="맑은 고딕", size=11)
+                font_total = Font(name="맑은 고딕", size=11, bold=True)
+
+                thin_border = Border(
+                    left=Side(style="thin", color="000000"), right=Side(style="thin", color="000000"),
+                    top=Side(style="thin", color="000000"), bottom=Side(style="thin", color="000000")
+                )
+
+                for r in range(1, total_row + 1):
+                    for c in range(1, 12):
+                        cell = ws.cell(row=r, column=c)
+                        cell.border = thin_border
+
+                        if r in [1, 2]:
+                            cell.fill = header_fill
+                            cell.font = font_header
+                            cell.alignment = Alignment(horizontal="center", vertical="center")
+                        elif r == total_row:
+                            cell.font = font_total
+                            cell.alignment = Alignment(horizontal="center", vertical="center") if c == 1 else Alignment(horizontal="right", vertical="center")
+                            if c > 1: cell.number_format = "#,##0"
+                        elif r in [pickup_row, accident_row]:
+                            cell.font = font_data
+                            cell.alignment = Alignment(horizontal="center", vertical="center") if c == 1 else Alignment(horizontal="right", vertical="center")
+                            if c > 1: cell.number_format = "#,##0"
+                        else:
+                            cell.font = font_data
+                            cell.alignment = Alignment(horizontal="center", vertical="center") if c == 1 else Alignment(horizontal="right", vertical="center")
+                            if c > 1: cell.number_format = "#,##0"
+
+                # 9. 열 너비 자동 맞춤
+                for col in ws.columns:
+                    max_len = max(len(str(cell.value or "")) for cell in col)
+                    col_letter = openpyxl.utils.get_column_letter(col[0].column)
+                    ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+                # --- 엑셀 데이터를 하드디스크가 아닌 메모리(스트림)에 임시 적재 ---
+                excel_buffer = BytesIO()
+                wb.save(excel_buffer)
+                processed_data = excel_buffer.getvalue()
+
+                st.balloons()
+                st.success("✨ 변환 완료!")
+
+                # 10. 유저에게 xlsx 파일 스트림으로 다운로드 창 제공
                 st.download_button(
-                    label="📥 변환된 엑셀 파일 다운로드",
+                    label="📥 변환된 정산 파일 다운로드",
                     data=processed_data,
                     file_name=download_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -122,4 +209,4 @@ if uploaded_file is not None:
 
         except Exception as e:
             st.error(f"⚠️ 에러 발생: {e}")
-            st.info("엑셀 파일의 필수 열 이름(픽업시간, 완료시간, 발송인 등)이 일치하는지 확인해주세요.")
+            st.info("업로드한 엑셀 파일에 '야간' 및 '주간' 시트가 정상적으로 존재하는지 확인해 주세요.")
